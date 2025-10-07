@@ -13,7 +13,7 @@ Before you can run these scripts there are a few things you need to set up, firs
 
 
 ## Scripts Overview
-The files `01__generate-gitlab-lists.sh` and `02__clone-scrub-import-client-repos.sh` are bash scripts that can be executed from your git bash terminal. These scripts perform the work of pulling repositories out of GitLab, undoing submodules, and migrating the repos into GitHub.
+The files `01__generate-gitlab-lists.sh` and `02__clone-scrub-import-client-repos.sh` are bash scripts that can be executed from your git bash terminal. These scripts perform the work of pulling repositories out of GitLab, prepping them, and migrating the repos into GitHub.
 
 ## Script "01" Overview
 ### Usage
@@ -22,7 +22,7 @@ The files `01__generate-gitlab-lists.sh` and `02__clone-scrub-import-client-repo
 ```
 
 ### "01" Summary
-This script makes a request to our GitLab instance's API for all the groups marked as **internal**[^1]. The script then loops over the list of groups and queries for all unarchived repositories in that group. For each group, the script generates a text file named `group--<gitlab-group-name>.txt` where each line represents an individual repository in that group[^2]. The following data is recorded for each repository:
+This script makes a request to our GitLab instance's API for all groups marked as **internal**[^1]. The script then loops over the list of groups and queries for all unarchived repositories in that group. The script generates a text file for each group named `group--<gitlab-group-name>.txt` where each line represents an individual repository in that group[^2]. The following data is recorded for each repository:
 * http url
 * group name
 * repository name
@@ -36,7 +36,7 @@ This data is comma-separated and an empty line is intentionally left at the bott
 ## Script "02" Overview
 ### Usage
 ```
-./02__clone-scrub-import-client-repos.sh -t <gitlab-token> -f <path-to-repo-list.txt>
+./02__clone-scrub-import-client-repos.sh -t <gitlab-token> -f <path-to-repo-list.txt> [ -c <repo-topics> ] [ -x <path-to-exclusions-list.txt> ]
 ```
 
 ### "02" Summary
@@ -51,11 +51,14 @@ This script reads the provided group text file and performs the following for ea
 <details><summary>8. Archive the GitLab repo.</summary>Archived repositories do not appear in GitLab so it'll help serve as a clear indicator as to whether or not a particular repository has been migrated. Also, the repository will not get pulled in by script "01" should the script need to be executed, again, to produce a fresh list of unmigrated repos.</details>
 <details><summary>9. Delete the local repo.</summary>If the script has successfully executed all of its instructions and reaches the end of the its tasks, the last thing it does is delete the cloned repo before moving onto the next one.</details>
 
-### Tips
-* You can author your own input files for script "02" so as long as you follow the expected format. This means you can curate a list of GitLab repositories spanning multiple groups in a new text file and feed that into the script.
+### "02" Tips
+* You can author your own input files as long as you follow the expected format. This means you can curate a list of GitLab repositories spanning multiple groups in a new text file and feed that into the script.
+* If you want to add one or more topics to the repos you are processing in a given list then provide them using the -c option.
+* You can provide a list of repositories to ignore by providing the filename to the -x option. This file follows the same format as the group input files.
 
-[^1]: This request will also return groups marked as **public** because if there is even one repository in a public group that is marked as internal, then the group is returned. It seems when we query GitLab for all **internal** groups, it's more like asking GitLab to provide a list of all groups that contain at least one repo marked as internal and the actual designations assigned to the groups don't matter as much.
+[^1]: This request will also return groups marked as **public** because if there is even one repository in a public group that is marked as internal, then the group is returned. It seems when we query GitLab for all **internal** groups, it's more like asking GitLab to provide a list of all groups that contain at least one repo marked as internal.
 [^2]: This script does not take into account that in addition to repositories, a group can contain subgroups and that subgroups in different parent groups can have the same name. This has the potential to lead to some wonkiness in terms of what repos appear in what list. Consider the following: a group named `templates` exists and within are a number of repos while another group named `Templates` exists as a subgroup of a parent group `packages`. The result is that the `group--templates.txt` file contains repositories from both `templates` and `Templates`. Regardless of this behavior the script still does its job of pulling every repo that satisfies its queries, even though it doesn't accurately reflect the organization of groups as they are structured in GitLab.
+
 
 
 
