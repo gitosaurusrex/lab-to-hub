@@ -13,7 +13,7 @@ Before you can run these scripts there are a few things you need to set up, firs
 
 
 ## Scripts Overview
-The files `01__generate-gitlab-lists.sh` and `02__clone-flatten-import.sh` are bash scripts that can be executed from your git bash terminal. These scripts perform the work of pulling repositories out of GitLab, undoing submodules, and migrating the repos into GitHub.
+The files `01__generate-gitlab-lists.sh` and `02__clone-scrub-import-client-repos.sh` are bash scripts that can be executed from your git bash terminal. These scripts perform the work of pulling repositories out of GitLab, undoing submodules, and migrating the repos into GitHub.
 
 ## Script "01" Overview
 ### Usage
@@ -56,5 +56,6 @@ This script reads the provided group text file and performs the following for ea
 
 [^1]: This request will also return groups marked as **public** because if there is even one repository in a public group that is marked as internal, then the group is returned. It seems when we query GitLab for all **internal** groups, it's more like asking GitLab to provide a list of all groups that contain at least one repo marked as internal and the actual designations assigned to the groups don't matter as much.
 [^2]: This script does not take into account that in addition to repositories, a group can contain subgroups and that subgroups in different parent groups can have the same name. This has the potential to lead to some wonkiness in terms of what repos appear in what list. Consider the following: a group named `templates` exists and within are a number of repos while another group named `Templates` exists as a subgroup of a parent group `packages`. The result is that the `group--templates.txt` file contains repositories from both `templates` and `Templates`. Regardless of this behavior the script still does its job of pulling every repo that satisfies its queries, even though it doesn't accurately reflect the organization of groups as they are structured in GitLab.
+
 
 
