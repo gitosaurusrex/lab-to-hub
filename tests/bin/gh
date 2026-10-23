@@ -1,0 +1,51 @@
+#!/bin/bash
+#
+# A stand-in for the gh commands the scripts use. GitHub repos are bare repos
+# at $FAKE_GITHUB_DIR/<org>/<repo>.git, with their settings stored next to
+# them in <repo>.meta/. Set FAKE_GH_FAIL_API_FOR=<org>/<repo> to make the team
+# permission call fail for that repo.
+
+set -uo pipefail
+
+echo "gh $*" >> "$FAKE_GITHUB_DIR/gh-calls.log"
+
+repo_dir() { echo "$FAKE_GITHUB_DIR/$1.git"; }
+meta_dir() { echo "$FAKE_GITHUB_DIR/$1.meta"; }
+
+case "$1 ${2:-}" in
+    "repo view")
+        [ -d "$(repo_dir "$3")" ] || { echo "GraphQL: Could not resolve to a Repository" >&2; exit 1; }
+        if [ -z "$(git --git-dir="$(repo_dir "$3")" for-each-ref)" ]; then echo true; else echo false; fi
+        ;;
+    "repo create")
+        repo=$3
+        shift 3
+        [ ! -d "$(repo_dir "$repo")" ] || { echo "Name already exists on this account" >&2; exit 1; }
+        git init -q --bare "$(repo_dir "$repo")"
+        mkdir -p "$(meta_dir "$repo")"
+        echo "$*" > "$(meta_dir "$repo")/create-args"
+        ;;
+    "repo edit")
+        repo=$3
+        [ -d "$(repo_dir "$repo")" ] || exit 1
+        case "$4" in
+            --add-topic) tr ',' '\n' <<< "$5" >> "$(meta_dir "$repo")/topics" ;;
+            --default-branch)
+                git --git-dir="$(repo_dir "$repo")" show-ref -q --verify "refs/heads/$5" || exit 1
+                git --git-dir="$(repo_dir "$repo")" symbolic-ref HEAD "refs/heads/$5"
+                ;;
+            *) exit 1 ;;
+        esac
+        ;;
+    "api -X")
+        # gh api -X PUT orgs/<org>/teams/<team>/repos/<org>/<repo> -f permission=<p> --silent
+        IFS=/ read -r _ _ _ team _ owner name <<< "$4"
+        [ -d "$(repo_dir "$owner/$name")" ] || { echo "HTTP 404: Not Found" >&2; exit 1; }
+        [ "${FAKE_GH_FAIL_API_FOR:-}" != "$owner/$name" ] || { echo "HTTP 502: Bad Gateway" >&2; exit 1; }
+        echo "$team ${6#permission=}" > "$(meta_dir "$owner/$name")/team"
+        ;;
+    *)
+        echo "fake gh: unsupported command: $*" >&2
+        exit 1
+        ;;
+esac
