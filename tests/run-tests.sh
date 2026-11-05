@@ -85,6 +85,7 @@ src="$work/src/with-submodule"
 git init -q "$src" && echo "readme" > "$src/README" && commit_all "$src" "readme"
 git -C "$src" checkout -qb develop
 git -C "$src" submodule -q add "file://$gitlab/lib.git" vendor/lib
+echo "build: {script: make}" > "$src/.gitlab-ci.yml"
 commit_all "$src" "add submodule"
 git clone -q --bare "$src" "$gitlab/with-submodule.git"
 
@@ -148,14 +149,14 @@ groups += [
     {"id": 4, "name": "broken", "full_path": "broken", "fail_page": 1},
     {"id": 1, "name": "websites", "full_path": "websites"},
 ]
-def project(id, name, path, group, empty=False, default_branch="main", archived=False):
-    return {"id": id, "name": name, "path": path, "archived": archived,
+def project(id, name, path, group, empty=False, default_branch="main", archived=False, description=""):
+    return {"id": id, "name": name, "path": path, "archived": archived, "description": description,
             "empty_repo": empty, "default_branch": None if empty else default_branch,
             "namespace": {"id": group["id"], "name": group["name"]},
             "http_url_to_repo": f"file://{gitlab}/{path}.git"}
 websites, templates, sub_templates = groups[-1], groups[-4], groups[-3]
 projects = [
-    project(101, "Corp Site", "corp-site", websites),
+    project(101, "Corp Site", "corp-site", websites, description="Corporate website"),
     project(102, "with-submodule", "with-submodule", websites, default_branch="develop"),
     project(103, "empty-one", "empty-one", websites, empty=True),
     project(104, "excluded-one", "excluded-one", websites),
@@ -214,6 +215,22 @@ sed -i 's/$/\r/' "$work/websites.txt"
 # README format, Windows line endings, a blank line and a url prefixing another.
 printf '%s\r\n' "file://$gitlab/excluded-one.git,websites,excluded-one,104" "" "file://$gitlab/corp" > "$work/exclusions.txt"
 
+# A dry run goes through every repo without changing GitHub or GitLab.
+github_repos_before=$(ls "$github")
+timeout 300 "$repo_root/02__clone-scrub-import-client-repos.sh" \
+    -f "$work/websites.txt" -x "$work/exclusions.txt" -n > "$work/dry-run.out" 2>&1
+check "dry run: finishes the batch" test $? -eq 0
+check "dry run: doesn't create GitHub repos" test "$(ls "$github")" = "$github_repos_before"
+check "dry run: only reads from GitHub" not grep -qv "^gh repo view " "$FAKE_GITHUB_DIR/gh-calls.log"
+check "dry run: doesn't archive anything in GitLab" not jq -e '[.projects[] | select(.id != 107) | .archived] | any' "$state"
+check "dry run: records what would be migrated" test "$(cut -d, -f3 "$run2/_dry-run_done.txt" | sort | tr '\n' ' ')" = "Corp Site flaky lfs-site with-submodule "
+check "dry run: records repos with secrets" grep -q "leaky,108" "$run2/_dry-run_has_secrets.txt"
+check "dry run: records failures" test "$(wc -l < "$run2/_dry-run_failed.txt")" -eq 2
+check "dry run: keeps its results apart from real runs" not test -e "$run2/_done.txt"
+check "dry run: says so in the summary" grep -q "would be migrated: 4" "$work/dry-run.out"
+
+# A _failed.txt from before the reasons were added, with a blank separator line.
+printf '\n%s\n' "file://$gitlab/old.git,websites,old,999" > "$run2/_failed.txt"
 FAKE_GH_FAIL_API_FOR=CORP-GITHUB/flaky timeout 300 "$repo_root/02__clone-scrub-import-client-repos.sh" \
     -f "$work/websites.txt" -x "$work/exclusions.txt" -c "client-a,wordpress" > "$work/run2.out" 2>&1
 check "finishes the batch" test $? -eq 0
@@ -235,7 +252,8 @@ for scrubbed in "sql dump: data/dump.sql" "sql dump: data/nested/old.sql" "sql d
 done
 check "doesn't record github.sql as scrubbed" not grep -q github.sql "$run2/_scrubbed.txt"
 check "copies the webdev-actions workflows into WordPress repos" site_git cat-file -e main:.github/workflows/deploy.yml
-check "creates the repo as internal for the team" grep -qx -- "--internal -t web-development" "$github/Corp-Site.meta/create-args"
+check "creates the repo as internal for the team" grep -q -- "^--internal -t web-development" "$github/Corp-Site.meta/create-args"
+check "copies the GitLab description" grep -q -- "--description Corporate website$" "$github/Corp-Site.meta/create-args"
 check "gives the team maintain access by default" grep -qx "web-development maintain" "$github/Corp-Site.meta/team"
 check "adds the -c topics" test "$(sort "$github/Corp-Site.meta/topics" | tr '\n' ' ')" = "client-a wordpress "
 check "records the migrated repo as done" grep -q "Corp Site,101" "$run2/_done.txt"
@@ -265,18 +283,24 @@ check "pushes the LFS files of every branch" test "$(find "$lfs/lfs/objects" -ty
 check "migrates every branch of an LFS repo" git --git-dir="$lfs" rev-parse -q --verify refs/heads/redesign
 check "archives the LFS repo" is_archived 109
 
-check "fails empty GitLab repos" grep -q "empty-one,103" "$run2/_failed.txt"
+check "fails empty GitLab repos" grep -q "empty-one,103,failed: checking the gitlab repo isn't empty" "$run2/_failed.txt"
 check "doesn't create GitHub repos for empty GitLab repos" not test -e "$github/empty-one.git"
-check "fails repos that already exist on GitHub" grep -q "already-there,105" "$run2/_failed.txt"
+check "fails repos that already exist on GitHub" grep -q "already-there,105,failed: checking github repo CORP-GITHUB/already-there is new or empty" "$run2/_failed.txt"
 check "leaves existing GitHub repos untouched" test "$(git --git-dir="$github/already-there.git" show-ref)" = "$already_there_refs"
 check "doesn't archive repos that weren't migrated" not is_archived 105
-check "fails a repo when a GitHub step fails" grep -q "flaky,106" "$run2/_failed.txt"
+check "fails a repo when a GitHub step fails" grep -q "flaky,106,failed: giving web-development maintain access" "$run2/_failed.txt"
 check "doesn't archive a repo that failed" not is_archived 106
 check "logs results without the old typo" not grep -q SUCCESSFULL "$run2/_log.txt"
+check "lists repos with a .gitlab-ci.yml" test "$(cut -d, -f3 "$run2/_has_gitlab_ci.txt")" = "with-submodule"
+check "sums up the run" grep -qx "  migrated: 3 (_done.txt)" "$work/run2.out"
+check "sums up the failures" grep -qx "  failed: 3 (_failed.txt)" "$work/run2.out"
+check "lists the failures of the run in the summary" grep -q "^    file://.*/flaky.git,.*failed: " "$work/run2.out"
+check "lists only the failures of the run in the summary" not grep -q "old,999" "$work/run2.out"
 
-# Retrying a failed repo reuses the empty GitHub repo the failed run created.
-rm -rf "$run2/_script-products/02__clone-scrub-import-client-repos/websites/flaky"
-grep "flaky" "$work/websites.txt" > "$work/retry.txt"
+# Retrying a failed repo straight from _failed.txt reuses the empty GitHub repo
+# and replaces the local clone the failed run left behind.
+check "keeps the local clone of a failed repo" test -d "$run2/_script-products/02__clone-scrub-import-client-repos/websites/flaky"
+grep "flaky" "$run2/_failed.txt" > "$work/retry.txt"
 GITHUB_TEAM_PERMISSION="admin" timeout 300 "$repo_root/02__clone-scrub-import-client-repos.sh" -f "$work/retry.txt" > "$work/retry.out" 2>&1
 check "migrates a failed repo when retried" grep -q "flaky,106" "$run2/_done.txt"
 check "pushes the retried repo to the reused GitHub repo" git --git-dir="$github/flaky.git" cat-file -e main:file.txt
