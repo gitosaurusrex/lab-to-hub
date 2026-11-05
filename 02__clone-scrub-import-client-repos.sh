@@ -22,25 +22,22 @@ script_name=$(basename "$0" .sh)
 main_output_dir="$base_dir/_script-products"
 output_dir="$main_output_dir/$script_name"
 logfile="$base_dir/_log.txt"
-done_file="$base_dir/_done.txt"
-failed_file="$base_dir/_failed.txt"
-excluded_file="$base_dir/_excluded.txt"
-has_modules_file="$base_dir/_has_modules.txt"
-has_secrets_file="$base_dir/_has_secrets.txt"
 secret_reports_dir="$main_output_dir/secret-reports"
-scrubbed_file="$base_dir/_scrubbed.txt"
 
 migration_logger() {
     local last_action=$1
     local exit_code=$2
-    local return_as_boolean=${3:-false}
+    local style=${3:-}
     local log_message=""
     local echo_reset_color='\033[0m'
     local echo_color result
 
-    if [[ "$return_as_boolean" == true ]]; then
+    if [[ "$style" == true ]]; then
         echo_color='\033[0;34m'
         if [ "$exit_code" -eq 0 ]; then result="TRUE"; else result="FALSE"; fi
+    elif [[ "$style" == skipped ]]; then
+        echo_color='\033[0;33m'
+        result="SKIPPED (dry run)"
     elif [ "$exit_code" -eq 0 ]; then
         echo_color='\033[0;32m'
         result="SUCCESSFUL"
@@ -55,8 +52,9 @@ migration_logger() {
 }
 
 usage() {
-  echo "Usage: $0 [ -t <your-gitlab-access-token> ] -f <path-to-input-textfile> [ -c <comma-separated-repo-topics> ] [ -x <path-to-exclusions-textfile> ]"
+  echo "Usage: $0 [ -t <your-gitlab-access-token> ] -f <path-to-input-textfile> [ -c <comma-separated-repo-topics> ] [ -x <path-to-exclusions-textfile> ] [ -n ]"
   echo "The token can also be provided through the GITLAB_TOKEN environment variable."
+  echo "-n does a dry run: every repo is cloned, scrubbed and scanned, but nothing is changed in GitHub or GitLab."
   exit 1
 }
 
@@ -64,12 +62,14 @@ gl_token="${GITLAB_TOKEN:-}"
 group_file=""
 repo_topics=""
 exclusions_file=""
-while getopts ":t:f:c:x:" opt; do
+dry_run=false
+while getopts ":t:f:c:x:n" opt; do
     case $opt in
         t) gl_token="$OPTARG";;
         f) group_file="$OPTARG";;
         c) repo_topics="$OPTARG";;
         x) exclusions_file="$OPTARG";;
+        n) dry_run=true;;
         \?) echo "Invalid option: -$OPTARG" >&2; usage;;
         :) echo "Option -$OPTARG requires a value." >&2; usage;;
     esac
@@ -78,6 +78,17 @@ if [ -z "$gl_token" ] || [ -z "$group_file" ]; then
   echo "Both a GitLab token (-t or GITLAB_TOKEN) and -f are required."
   usage
 fi
+
+# A dry run records its results in files of its own, so that they don't mix
+# with those of real runs.
+if $dry_run; then record_prefix="_dry-run"; else record_prefix=""; fi
+done_file="$base_dir/${record_prefix}_done.txt"
+failed_file="$base_dir/${record_prefix}_failed.txt"
+excluded_file="$base_dir/${record_prefix}_excluded.txt"
+has_modules_file="$base_dir/${record_prefix}_has_modules.txt"
+has_secrets_file="$base_dir/${record_prefix}_has_secrets.txt"
+has_gitlab_ci_file="$base_dir/${record_prefix}_has_gitlab_ci.txt"
+scrubbed_file="$base_dir/${record_prefix}_scrubbed.txt"
 
 if [ ! -f "$group_file" ]; then
     echo "Error: Input file $group_file not found."
@@ -132,12 +143,24 @@ run_step() {
     "$@"
     local exit_code=$?
     migration_logger "$action" "$exit_code"
+    [ "$exit_code" -eq 0 ] || failed_step=$action
     return "$exit_code"
 }
 
-# Only ever called from migrate_repo, which runs in a subshell.
+# Like run_step, for steps that change GitHub or GitLab. A dry run only logs
+# them.
+change_step() {
+    if $dry_run; then
+        migration_logger "$1" 0 skipped
+        return 0
+    fi
+    run_step "$@"
+}
+
+# Records the repo as failed, along with the step that failed, and moves on to
+# the next one. Only ever called from migrate_repo, which runs in a subshell.
 fail() {
-    record_repo "$failed_file"
+    echo "$http_url,$group_name,$project_name,$project_id,failed: ${1:-${failed_step:-unknown step}}" >> "$failed_file"
     exit 1
 }
 
@@ -177,6 +200,10 @@ update_actions_repo() {
     fi
 }
 
+archive_gitlab_repo() {
+    json_test '.archived == true' <<< "$(gitlab_api POST "projects/$project_id/archive")"
+}
+
 # Succeeds when the remote has exactly the local branches and tags.
 remote_refs_match() {
     diff <(git for-each-ref --format='%(objectname) %(refname)' refs/heads refs/tags | sort) \
@@ -186,7 +213,7 @@ remote_refs_match() {
 # Migrates the current repo. Runs in a subshell so that it can exit at the
 # first failed step and its cd doesn't leak into the main loop.
 migrate_repo() {
-    local project_json default_branch target_project_name github_repo is_empty
+    local project_json default_branch description target_project_name github_repo is_empty
     local reuse_github_repo=false
     local clone_dir="$output_dir/$group_name/$project_name"
 
@@ -195,24 +222,36 @@ migrate_repo() {
     target_project_name=$(printf '%s' "$project_name" | sed -E 's/[^A-Za-z0-9._-]+/-/g')
     github_repo="$github_repo_target/$target_project_name"
 
-    run_step "valid repo id" grep -qE '^[0-9]+$' <<< "$project_id" || fail
+    run_step "checking the repo id is a number" grep -qE '^[0-9]+$' <<< "$project_id" || fail
 
     project_json=$(gitlab_api GET "projects/$project_id")
-    run_step "nonempty gitlab repo check" json_test '.empty_repo == false' <<< "$project_json" || fail
+    run_step "checking the gitlab repo isn't empty" json_test '.empty_repo == false' <<< "$project_json" || fail
     default_branch=$(jq -r '.default_branch // empty' <<< "$project_json")
+    description=$(jq -r '.description // empty' <<< "$project_json")
 
     if is_empty=$(gh repo view "$github_repo" --json isEmpty --jq .isEmpty 2> /dev/null); then
         # An empty repo is left behind when an earlier run failed after
         # creating it, so carry on with it rather than failing forever.
-        run_step "github repo $github_repo is unused" test "$is_empty" = true || fail
+        run_step "checking github repo $github_repo is new or empty" test "$is_empty" = true || fail
         reuse_github_repo=true
     fi
 
+    # The clone is only ever left behind by an earlier run that stopped.
+    if [ -e "$clone_dir" ]; then
+        run_step "removing local clone left by an earlier run" rm -rf "$clone_dir" || fail
+    fi
     run_step "cloning gitlab repo locally" git clone --recursive "$http_url" "$clone_dir" || fail
     cd "$clone_dir" || fail
 
     # Has to happen before git-filter-repo, which removes the origin remote.
     run_step "fetching Git LFS files of every branch" git lfs fetch --all origin || fail
+
+    # GitLab CI pipelines aren't migrated; these repos need a GitHub Actions port.
+    local has_gitlab_ci=false
+    if [ -f .gitlab-ci.yml ]; then
+        has_gitlab_ci=true
+        migration_logger "repo has a .gitlab-ci.yml to port to GitHub Actions" 0 true
+    fi
     local uses_lfs=false
     if [ -n "$(find .git/lfs/objects -type f -print -quit 2> /dev/null)" ]; then
         uses_lfs=true
@@ -274,42 +313,48 @@ migrate_repo() {
         record_repo "$has_secrets_file"
         exit 1
     fi
-    [ "$exit_code" -eq 0 ] || fail
+    [ "$exit_code" -eq 0 ] || fail "scanning history for secrets"
     rm -f "$secrets_report"
 
     if ! $reuse_github_repo; then
-        run_step "creating repo in GitHub and adding webdev access" \
-            gh repo create "$github_repo" --internal -t "$github_team" || fail
+        local create_args=(--internal -t "$github_team")
+        if [ -n "$description" ]; then
+            create_args+=(--description "$description")
+        fi
+        change_step "creating repo in GitHub and adding webdev access" \
+            gh repo create "$github_repo" "${create_args[@]}" || fail
     fi
 
     if [ -n "$(find . -maxdepth 1 -type f -name "*.aspx")" ]; then
-        run_step "adding topic legacy-framework" gh repo edit "$github_repo" --add-topic "legacy-framework"
+        change_step "adding topic legacy-framework" gh repo edit "$github_repo" --add-topic "legacy-framework"
     fi
 
     if [ -n "$repo_topics" ]; then
-        run_step "adding topic(s) $repo_topics" gh repo edit "$github_repo" --add-topic "$repo_topics"
+        change_step "adding topic(s) $repo_topics" gh repo edit "$github_repo" --add-topic "$repo_topics"
     fi
 
-    run_step "giving $github_team $github_team_permission access" \
+    change_step "giving $github_team $github_team_permission access" \
         gh api -X PUT "orgs/$github_repo_target/teams/$github_team/repos/$github_repo" -f permission="$github_team_permission" --silent || fail
 
     run_step "adding github remote to repository" \
         git remote add github "https://github.com/$github_repo.git" || fail
 
     if $uses_lfs; then
-        run_step "pushing Git LFS files to github" git lfs push --all github || fail
+        change_step "pushing Git LFS files to github" git lfs push --all github || fail
     fi
-    run_step "mirroring repo to github" git push github 'refs/heads/*:refs/heads/*' 'refs/tags/*:refs/tags/*' || fail
-    run_step "verifying every branch and tag reached github" remote_refs_match github || fail
+    change_step "mirroring repo to github" git push github 'refs/heads/*:refs/heads/*' 'refs/tags/*:refs/tags/*' || fail
+    change_step "verifying every branch and tag reached github" remote_refs_match github || fail
     record_repo "$done_file"
+    if $has_gitlab_ci; then
+        record_repo "$has_gitlab_ci_file"
+    fi
 
     if [ -n "$default_branch" ]; then
-        run_step "setting github default branch to $default_branch" \
+        change_step "setting github default branch to $default_branch" \
             gh repo edit "$github_repo" --default-branch "$default_branch"
     fi
 
-    run_step "post-migration: archiving repo in GitLab" \
-        json_test '.archived == true' <<< "$(gitlab_api POST "projects/$project_id/archive")"
+    change_step "post-migration: archiving repo in GitLab" archive_gitlab_repo
 
     cd "$base_dir" || exit 1
     run_step "post-migration: cleaning up local repo" rm -rf "$clone_dir"
@@ -325,7 +370,7 @@ done
 mkdir -p "$output_dir" "$secret_reports_dir"
 
 {
-    echo -e "\n$(date "+[%d-%b-%Y %H:%M:%S]")[executing: $script_name]"
+    echo -e "\n$(date "+[%d-%b-%Y %H:%M:%S]")[executing: $script_name$($dry_run && echo " (dry run)")]"
     echo -e "                      [input file: $(realpath "$group_file")]"
     echo -e "                      [input file line count: $(grep -c '[^[:space:]]' "$group_file")]"
     if [ -n "$exclusions_file" ]; then
@@ -334,8 +379,23 @@ mkdir -p "$output_dir" "$secret_reports_dir"
     fi
 } >> "$logfile"
 
+# Counts every line, blank ones included, so that the summary can list the
+# lines a run added with tail.
+count_lines() {
+    if [ -f "$1" ]; then wc -l < "$1"; else echo 0; fi
+}
+
+if $dry_run; then migrated_label="would be migrated"; else migrated_label="migrated"; fi
+summary_labels=("$migrated_label" "failed" "excluded" "have nested submodules" "have secrets" "have a .gitlab-ci.yml to port")
+summary_files=("$done_file" "$failed_file" "$excluded_file" "$has_modules_file" "$has_secrets_file" "$has_gitlab_ci_file")
+summary_starts=()
+for file in "${summary_files[@]}"; do
+    summary_starts+=("$(count_lines "$file")")
+done
+
 # The list is read from fd 3 so that commands in the loop can't consume it.
-while IFS=, read -r http_url group_name project_name project_id <&3 || [ -n "$http_url" ]; do
+# Fields after the fourth, such as the reasons in _failed.txt, are ignored.
+while IFS=, read -r http_url group_name project_name project_id _ <&3 || [ -n "$http_url" ]; do
     http_url=$(trim "$http_url")
     group_name=$(trim "$group_name")
     project_name=$(trim "$project_name")
@@ -350,4 +410,11 @@ while IFS=, read -r http_url group_name project_name project_id <&3 || [ -n "$ht
 
     ( migrate_repo )
 done 3< "$group_file"
-echo "$(date "+[%d-%b-%Y %H:%M:%S]") $group_file processed. EOL" | tee -a "$logfile"
+{
+    echo "$(date "+[%d-%b-%Y %H:%M:%S]") $group_file processed. EOL"
+    echo "Summary$($dry_run && echo " (dry run)"):"
+    for i in "${!summary_files[@]}"; do
+        echo "  ${summary_labels[i]}: $(( $(count_lines "${summary_files[i]}") - summary_starts[i] )) (${summary_files[i]##*/})"
+    done
+    tail -n +"$((summary_starts[1] + 1))" "$failed_file" 2> /dev/null | sed 's/^/    /'
+} | tee -a "$logfile"
