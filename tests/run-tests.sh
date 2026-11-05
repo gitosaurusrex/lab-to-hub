@@ -2,7 +2,8 @@
 #
 # End-to-end tests for both scripts, run against a fake GitLab API
 # (fake_gitlab.py), a fake gh (bin/gh) and local bare repositories standing in
-# for GitLab and GitHub. Needs git, git-filter-repo, jq, curl and python3.
+# for GitLab and GitHub. Needs git, git-lfs, git-filter-repo, gitleaks, jq, curl
+# and python3.
 #
 # Usage: tests/run-tests.sh
 
@@ -43,6 +44,7 @@ git config --global init.defaultBranch main
 git config --global advice.detachedHead false
 git config --global protocol.file.allow always
 git config --global url."file://$FAKE_GITHUB_DIR/".insteadOf "https://github.com/"
+git lfs install --skip-repo > /dev/null
 
 gitlab="$work/gitlab/websites"
 github="$FAKE_GITHUB_DIR/CORP-GITHUB"
@@ -92,6 +94,35 @@ for name in excluded-one already-there flaky; do
     git init -q "$src" && echo "$name" > "$src/file.txt" && commit_all "$src" "$name"
     git clone -q --bare "$src" "$gitlab/$name.git"
 done
+
+# A repo with a key that was committed and later removed on a side branch, and
+# a .gitleaks.toml that would hide it. The key is put together at runtime so
+# that this file doesn't contain anything that looks like one.
+src="$work/src/leaky"
+aws_id_tail="Z2Q3R4S5T6U7V2W3"
+git init -q "$src" && echo "leaky" > "$src/file.txt"
+printf "[allowlist]\npaths = ['''.*''']\n" > "$src/.gitleaks.toml"
+commit_all "$src" "leaky"
+git -C "$src" checkout -qb old-feature
+echo "aws_access_key_id = \"AKIA$aws_id_tail\"" > "$src/config.ini"
+commit_all "$src" "add config"
+git -C "$src" rm -q config.ini && git -C "$src" commit -qm "remove config"
+git -C "$src" checkout -q main
+git clone -q --bare "$src" "$gitlab/leaky.git"
+
+# A repo with Git LFS files on two branches. They're bigger than
+# MAX_BLOB_SIZE, which must not strip them.
+src="$work/src/lfs-site"
+git init -q "$src" && git -C "$src" lfs track '*.psd' > /dev/null
+head -c 2000000 /dev/urandom > "$src/home.psd"
+commit_all "$src" "home design"
+git -C "$src" checkout -qb redesign
+head -c 2000000 /dev/urandom > "$src/about.psd"
+commit_all "$src" "about design"
+git -C "$src" checkout -q main
+git init -q --bare "$gitlab/lfs-site.git"
+git -C "$src" push -q "file://$gitlab/lfs-site.git" --all 2> /dev/null
+
 git clone -q --bare "$work/src/already-there" "$github/already-there.git"
 already_there_refs=$(git --git-dir="$github/already-there.git" show-ref)
 
@@ -131,6 +162,8 @@ projects = [
     project(105, "already-there", "already-there", websites),
     project(106, "flaky", "flaky", websites),
     project(107, "old-archived", "old-archived", websites, archived=True),
+    project(108, "leaky", "leaky", websites),
+    project(109, "lfs-site", "lfs-site", websites),
     project(201, "template-a", "template-a", templates),
     project(301, "template-b", "template-b", sub_templates),
 ]
@@ -158,7 +191,7 @@ check "exits non-zero when a group can't be listed" test "$status" -eq 1
 check "reports the group that failed" grep -q "repos of group broken" "$work/run1.out"
 check "lists groups beyond the first page" test -f "$lists/group--websites.txt"
 check "writes a file for every listable group" test "$(find "$lists" -name 'group--*.txt' | wc -l)" -eq 23
-check "lists unarchived repos only" test "$(wc -l < "$lists/group--websites.txt")" -eq 6
+check "lists unarchived repos only" test "$(wc -l < "$lists/group--websites.txt")" -eq 8
 check "writes url,group,name,id lines" grep -qx "file://$gitlab/corp-site.git,websites,Corp Site,101" "$lists/group--websites.txt"
 check "keeps a subgroup apart from a group of the same name" grep -q template-b "$lists/group--packages__Templates.txt"
 check "doesn't mix subgroup repos into the other group" not grep -q template-b "$lists/group--templates.txt"
@@ -203,7 +236,7 @@ done
 check "doesn't record github.sql as scrubbed" not grep -q github.sql "$run2/_scrubbed.txt"
 check "copies the webdev-actions workflows into WordPress repos" site_git cat-file -e main:.github/workflows/deploy.yml
 check "creates the repo as internal for the team" grep -qx -- "--internal -t web-development" "$github/Corp-Site.meta/create-args"
-check "gives the team admin access" grep -qx "web-development admin" "$github/Corp-Site.meta/team"
+check "gives the team maintain access by default" grep -qx "web-development maintain" "$github/Corp-Site.meta/team"
 check "adds the -c topics" test "$(sort "$github/Corp-Site.meta/topics" | tr '\n' ' ')" = "client-a wordpress "
 check "records the migrated repo as done" grep -q "Corp Site,101" "$run2/_done.txt"
 check "archives the migrated repo in GitLab" is_archived 101
@@ -214,6 +247,23 @@ check "sets the GitHub default branch to GitLab's" test "$(git --git-dir="$sub" 
 check "turns submodules into regular files" test "$(git --git-dir="$sub" cat-file -t develop:vendor/lib/lib.txt)" = blob
 check "removes .gitmodules" not git --git-dir="$sub" cat-file -e develop:.gitmodules
 check "archives the repo with submodules" is_archived 102
+
+check "doesn't keep a secrets report for clean repos" not test -e "$run2/_script-products/secret-reports/websites--Corp Site.json"
+
+leaky_report="$run2/_script-products/secret-reports/websites--leaky.json"
+check "records repos with secrets anywhere in their history" grep -q "leaky,108" "$run2/_has_secrets.txt"
+check "ignores a .gitleaks.toml inside the migrated repo" test -s "$leaky_report"
+check "reports what was found" jq -e '.[0].RuleID == "aws-access-token" and .[0].File == "config.ini"' "$leaky_report"
+check "redacts the secret in the report" not grep -q "$aws_id_tail" "$leaky_report"
+check "doesn't create GitHub repos for repos with secrets" not test -e "$github/leaky.git"
+check "doesn't archive repos with secrets" not is_archived 108
+check "keeps the local clone of a repo with secrets for review" test -d "$run2/_script-products/02__clone-scrub-import-client-repos/websites/leaky"
+
+lfs="$github/lfs-site.git"
+check "keeps LFS pointers in the migrated history" grep -q "^version https://git-lfs" <(git --git-dir="$lfs" cat-file -p main:home.psd)
+check "pushes the LFS files of every branch" test "$(find "$lfs/lfs/objects" -type f | wc -l)" -eq 2
+check "migrates every branch of an LFS repo" git --git-dir="$lfs" rev-parse -q --verify refs/heads/redesign
+check "archives the LFS repo" is_archived 109
 
 check "fails empty GitLab repos" grep -q "empty-one,103" "$run2/_failed.txt"
 check "doesn't create GitHub repos for empty GitLab repos" not test -e "$github/empty-one.git"
@@ -227,10 +277,11 @@ check "logs results without the old typo" not grep -q SUCCESSFULL "$run2/_log.tx
 # Retrying a failed repo reuses the empty GitHub repo the failed run created.
 rm -rf "$run2/_script-products/02__clone-scrub-import-client-repos/websites/flaky"
 grep "flaky" "$work/websites.txt" > "$work/retry.txt"
-timeout 300 "$repo_root/02__clone-scrub-import-client-repos.sh" -f "$work/retry.txt" > "$work/retry.out" 2>&1
+GITHUB_TEAM_PERMISSION="admin" timeout 300 "$repo_root/02__clone-scrub-import-client-repos.sh" -f "$work/retry.txt" > "$work/retry.out" 2>&1
 check "migrates a failed repo when retried" grep -q "flaky,106" "$run2/_done.txt"
 check "pushes the retried repo to the reused GitHub repo" git --git-dir="$github/flaky.git" cat-file -e main:file.txt
 check "archives the retried repo" is_archived 106
+check "gives the team the permission set in GITHUB_TEAM_PERMISSION" grep -qx "web-development admin" "$github/flaky.meta/team"
 
 # Rerunning a list doesn't overwrite repos that are already on GitHub.
 site_refs=$(site_git show-ref)

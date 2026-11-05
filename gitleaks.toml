@@ -1,0 +1,9 @@
+# Secret scanning rules used by 02__clone-scrub-import-client-repos.sh. They
+# extend gitleaks' default rules. Add allowlists here for findings that were
+# reviewed and turned out to be false positives, or list their fingerprints in
+# a .gitleaksignore file next to this one.
+# See https://github.com/gitleaks/gitleaks#configuration
+title = "lab-to-hub"
+
+[extend]
+useDefault = true

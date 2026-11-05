@@ -13,5 +13,15 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install git-filter-repo
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: 8.28.0
+          GITLEAKS_SHA256: a65b5253807a68ac0cafa4414031fd740aeb55f54fb7e55f386acb52e6a840eb
+        run: |
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSLO "https://github.com/gitleaks/gitleaks/releases/download/v$GITLEAKS_VERSION/$tarball"
+          echo "$GITLEAKS_SHA256  $tarball" | sha256sum -c
+          sudo tar -xzf "$tarball" -C /usr/local/bin gitleaks
+          git lfs install
       - run: shellcheck *.sh tests/*.sh tests/bin/gh
       - run: tests/run-tests.sh
