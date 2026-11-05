@@ -8,11 +8,16 @@ set -uo pipefail
 gitlab_url="${GITLAB_URL:-https://GITLAB-HOSTNAME}"
 github_repo_target="${GITHUB_ORG:-CORP-GITHUB}"
 github_team="${GITHUB_TEAM:-web-development}"
+github_team_permission="${GITHUB_TEAM_PERMISSION:-maintain}"
 max_blob_size="${MAX_BLOB_SIZE:-90M}"
 # Database dumps under data/ are removed from every commit; github.sql is kept.
 sql_dump_regex='^data/(?:.*/)?(?!github\.sql$)[^/]*\.sql$'
 
 base_dir=$(pwd)
+script_dir=$(cd "$(dirname "$0")" && pwd)
+# The secret scan always uses this repo's gitleaks.toml and .gitleaksignore, so
+# that the ones inside a migrated repo can't switch it off.
+gitleaks_config="$script_dir/gitleaks.toml"
 script_name=$(basename "$0" .sh)
 main_output_dir="$base_dir/_script-products"
 output_dir="$main_output_dir/$script_name"
@@ -21,6 +26,8 @@ done_file="$base_dir/_done.txt"
 failed_file="$base_dir/_failed.txt"
 excluded_file="$base_dir/_excluded.txt"
 has_modules_file="$base_dir/_has_modules.txt"
+has_secrets_file="$base_dir/_has_secrets.txt"
+secret_reports_dir="$main_output_dir/secret-reports"
 scrubbed_file="$base_dir/_scrubbed.txt"
 
 migration_logger() {
@@ -204,6 +211,16 @@ migrate_repo() {
     run_step "cloning gitlab repo locally" git clone --recursive "$http_url" "$clone_dir" || fail
     cd "$clone_dir" || fail
 
+    # Has to happen before git-filter-repo, which removes the origin remote.
+    run_step "fetching Git LFS files of every branch" git lfs fetch --all origin || fail
+    local uses_lfs=false
+    if [ -n "$(find .git/lfs/objects -type f -print -quit 2> /dev/null)" ]; then
+        uses_lfs=true
+        migration_logger "repo uses Git LFS" 0 true
+    else
+        migration_logger "repo uses Git LFS" 1 true
+    fi
+
     list_scrubbed_content >> "$scrubbed_file"
     run_step "pruning $max_blob_size+ files and data/*.sql dumps from history" \
         git-filter-repo --force --strip-blobs-bigger-than "$max_blob_size" --invert-paths --path-regex "$sql_dump_regex" || fail
@@ -240,6 +257,26 @@ migrate_repo() {
         migration_logger "checking if WordPress" 1 true
     fi
 
+    run_step "git adding all for final product" git add --all || fail
+    if ! git diff --cached --quiet; then
+        run_step "git committing final product" git commit -m "Pre-GitHub Mirroring Commit" || fail
+    fi
+
+    # Scanned after the commit above so that files from flattened submodules
+    # are covered too. Reports are redacted; the local clone is kept for review.
+    local secrets_report="$secret_reports_dir/$group_name--$project_name.json"
+    gitleaks git --no-banner --redact --exit-code 3 --config "$gitleaks_config" --gitleaks-ignore-path "$script_dir" \
+        --report-format json --report-path "$secrets_report" .
+    local exit_code=$?
+    migration_logger "scanning history for secrets" "$exit_code"
+    if [ "$exit_code" -eq 3 ]; then
+        echo "Secrets found, see $secrets_report"
+        record_repo "$has_secrets_file"
+        exit 1
+    fi
+    [ "$exit_code" -eq 0 ] || fail
+    rm -f "$secrets_report"
+
     if ! $reuse_github_repo; then
         run_step "creating repo in GitHub and adding webdev access" \
             gh repo create "$github_repo" --internal -t "$github_team" || fail
@@ -253,17 +290,15 @@ migrate_repo() {
         run_step "adding topic(s) $repo_topics" gh repo edit "$github_repo" --add-topic "$repo_topics"
     fi
 
-    run_step "changing webdev access to admin" \
-        gh api -X PUT "orgs/$github_repo_target/teams/$github_team/repos/$github_repo" -f permission="admin" --silent || fail
+    run_step "giving $github_team $github_team_permission access" \
+        gh api -X PUT "orgs/$github_repo_target/teams/$github_team/repos/$github_repo" -f permission="$github_team_permission" --silent || fail
 
     run_step "adding github remote to repository" \
         git remote add github "https://github.com/$github_repo.git" || fail
 
-    run_step "git adding all for final product" git add --all || fail
-    if ! git diff --cached --quiet; then
-        run_step "git committing final product" git commit -m "Pre-GitHub Mirroring Commit" || fail
+    if $uses_lfs; then
+        run_step "pushing Git LFS files to github" git lfs push --all github || fail
     fi
-
     run_step "mirroring repo to github" git push github 'refs/heads/*:refs/heads/*' 'refs/tags/*:refs/tags/*' || fail
     run_step "verifying every branch and tag reached github" remote_refs_match github || fail
     record_repo "$done_file"
@@ -280,7 +315,14 @@ migrate_repo() {
     run_step "post-migration: cleaning up local repo" rm -rf "$clone_dir"
 }
 
-mkdir -p "$output_dir"
+for tool in git-filter-repo git-lfs gitleaks gh jq; do
+    if ! command -v "$tool" > /dev/null; then
+        echo "Error: $tool is required but wasn't found. See the README's prerequisites."
+        exit 1
+    fi
+done
+
+mkdir -p "$output_dir" "$secret_reports_dir"
 
 {
     echo -e "\n$(date "+[%d-%b-%Y %H:%M:%S]")[executing: $script_name]"
