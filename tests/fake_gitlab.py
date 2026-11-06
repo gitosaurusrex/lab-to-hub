@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlsplit
 
 TOKEN = "secret-token"
 MAX_PER_PAGE = 10
-KNOWN_PARAMS = {"per_page", "page", "order_by", "sort", "archived"}
+KNOWN_PARAMS = {"per_page", "page", "order_by", "sort", "archived", "simple"}
 
 state_path, port_path = sys.argv[1], sys.argv[2]
 with open(state_path) as f:
@@ -62,6 +62,11 @@ class Handler(BaseHTTPRequestHandler):
             if group.get("fail_page") == page:
                 return self.reply(500, {"message": "500 Internal Server Error"})
             projects = [p for p in state["projects"] if p["namespace"]["id"] == group["id"]]
+            if query.get("archived") == ["false"]:
+                projects = [p for p in projects if not p["archived"]]
+            return paginate(projects)
+        if method == "GET" and parts == ["projects"]:
+            projects = state["projects"]
             if query.get("archived") == ["false"]:
                 projects = [p for p in projects if not p["archived"]]
             return paginate(projects)

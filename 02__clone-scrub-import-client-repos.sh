@@ -113,6 +113,24 @@ gitlab_api() {
         curl -sSf --config - --request "$method" "$gitlab_url/api/v4/$endpoint"
 }
 
+# Prints every item of a paginated GitLab API collection, one JSON object per
+# line, failing when a page can't be fetched or isn't a JSON array.
+gitlab_get_all() {
+    local endpoint=$1 query=$2 page=1 response
+    while :; do
+        response=$(gitlab_api GET "$endpoint?${query:+$query&}per_page=100&page=$page") || return 1
+        jq -e 'type == "array"' <<< "$response" > /dev/null || return 1
+        [ "$(jq 'length' <<< "$response")" -eq 0 ] && return 0
+        jq -c '.[]' <<< "$response"
+        page=$((page + 1))
+    done
+}
+
+# Makes the names on stdin valid GitHub repo names, e.g. by replacing spaces.
+github_name() {
+    sed -E 's/[^A-Za-z0-9._-]+/-/g'
+}
+
 # Succeeds when the JSON on stdin satisfies the given jq condition.
 json_test() {
     jq -e "$1" > /dev/null
@@ -217,17 +235,23 @@ migrate_repo() {
     local reuse_github_repo=false
     local clone_dir="$output_dir/$group_name/$project_name"
 
-    # Names GitHub doesn't accept (e.g. with spaces) are made valid here so
-    # that every step below uses the same name.
-    target_project_name=$(printf '%s' "$project_name" | sed -E 's/[^A-Za-z0-9._-]+/-/g')
-    github_repo="$github_repo_target/$target_project_name"
-
     run_step "checking the repo id is a number" grep -qE '^[0-9]+$' <<< "$project_id" || fail
 
     project_json=$(gitlab_api GET "projects/$project_id")
     run_step "checking the gitlab repo isn't empty" json_test '.empty_repo == false' <<< "$project_json" || fail
     default_branch=$(jq -r '.default_branch // empty' <<< "$project_json")
     description=$(jq -r '.description // empty' <<< "$project_json")
+
+    # Every step below uses this name. Repos in a group whose names clash with
+    # another GitLab repo's get the group's name as a prefix; repos in a user's
+    # namespace keep theirs.
+    target_project_name=$(github_name <<< "$project_name")
+    if json_test '.namespace.kind == "group"' <<< "$project_json" &&
+        grep -qixF -- "$target_project_name" <<< "$clashing_names"; then
+        target_project_name="$(jq -r '.namespace.name' <<< "$project_json" | github_name)-$target_project_name"
+        migration_logger "repo name clashes with another GitLab repo's, so it becomes $target_project_name" 0 true
+    fi
+    github_repo="$github_repo_target/$target_project_name"
 
     if is_empty=$(gh repo view "$github_repo" --json isEmpty --jq .isEmpty 2> /dev/null); then
         # An empty repo is left behind when an earlier run failed after
@@ -368,6 +392,15 @@ for tool in git-filter-repo git-lfs gitleaks gh jq; do
 done
 
 mkdir -p "$output_dir" "$secret_reports_dir"
+
+# GitHub repo names are unique within the organization, ignoring case. Names
+# that more than one GitLab repo would get, archived repos included, clash.
+echo "Requesting the names of all GitLab repos"
+if ! all_repos=$(gitlab_get_all "projects" "simple=true"); then
+    echo "Error: Unable to retrieve the list of GitLab repos." >&2
+    exit 1
+fi
+clashing_names=$(jq -r '.name' <<< "$all_repos" | github_name | sort -f | uniq -di)
 
 {
     echo -e "\n$(date "+[%d-%b-%Y %H:%M:%S]")[executing: $script_name$($dry_run && echo " (dry run)")]"
