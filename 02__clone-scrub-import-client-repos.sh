@@ -10,6 +10,10 @@ github_repo_target="${GITHUB_ORG:-CORP-GITHUB}"
 github_team="${GITHUB_TEAM:-web-development}"
 github_team_permission="${GITHUB_TEAM_PERMISSION:-maintain}"
 max_blob_size="${MAX_BLOB_SIZE:-90M}"
+if ! max_blob_bytes=$(numfmt --from=iec "$max_blob_size"); then
+    echo "Error: MAX_BLOB_SIZE must be a size such as 90M."
+    exit 1
+fi
 # Database dumps under data/ are removed from every commit; github.sql is kept.
 sql_dump_regex='^data/(?:.*/)?(?!github\.sql$)[^/]*\.sql$'
 
@@ -184,16 +188,28 @@ fail() {
 
 # Lists what the history rewrite will remove, so there is a record of it.
 list_scrubbed_content() {
-    local max_bytes
-    max_bytes=$(numfmt --from=iec "$max_blob_size")
     git rev-list --objects --all |
         git cat-file --batch-check='%(objecttype) %(objectsize) %(rest)' |
-        awk -v limit="$max_bytes" -v repo="$group_name/$project_name" '$1 == "blob" {
+        awk -v limit="$max_blob_bytes" -v repo="$group_name/$project_name" '$1 == "blob" {
             path = $0
             sub(/^[^ ]+ [^ ]+ /, "", path)
             if ($2 > limit) print repo ": large file (" $2 " bytes): " path
             else if (path ~ /^data\/(.*\/)?[^\/]*\.sql$/ && path !~ /(^|\/)github\.sql$/) print repo ": sql dump: " path
         }'
+}
+
+# The history rewrite only covers the repo's own history, so files over the
+# size limit can still come in with flattened submodules. Leaves them out of
+# the commit, as GitHub would refuse the push, and records them.
+remove_large_staged_files() {
+    local path size
+    while IFS= read -r -d '' path; do
+        size=$(git cat-file -s ":$path") || return 1
+        if [ "$size" -gt "$max_blob_bytes" ]; then
+            echo "$group_name/$project_name: large file from a submodule ($size bytes): $path" >> "$scrubbed_file"
+            git rm --cached --quiet -- "$path" && rm -f -- "$path" || return 1
+        fi
+    done < <(git diff --cached --name-only -z --diff-filter=AM)
 }
 
 # Turns the submodules listed in .gitmodules into regular directories.
@@ -276,14 +292,6 @@ migrate_repo() {
         has_gitlab_ci=true
         migration_logger "repo has a .gitlab-ci.yml to port to GitHub Actions" 0 true
     fi
-    local uses_lfs=false
-    if [ -n "$(find .git/lfs/objects -type f -print -quit 2> /dev/null)" ]; then
-        uses_lfs=true
-        migration_logger "repo uses Git LFS" 0 true
-    else
-        migration_logger "repo uses Git LFS" 1 true
-    fi
-
     list_scrubbed_content >> "$scrubbed_file"
     run_step "pruning $max_blob_size+ files and data/*.sql dumps from history" \
         git-filter-repo --force --strip-blobs-bigger-than "$max_blob_size" --invert-paths --path-regex "$sql_dump_regex" || fail
@@ -321,8 +329,19 @@ migrate_repo() {
     fi
 
     run_step "git adding all for final product" git add --all || fail
+    run_step "leaving out $max_blob_size+ files from submodules" remove_large_staged_files || fail
     if ! git diff --cached --quiet; then
         run_step "git committing final product" git commit -m "Pre-GitHub Mirroring Commit" || fail
+    fi
+
+    # Checked after the commit above, as flattened submodules can bring Git
+    # LFS files into a repo that had none.
+    local uses_lfs=false
+    if [ -n "$(find .git/lfs/objects -type f -print -quit 2> /dev/null)" ]; then
+        uses_lfs=true
+        migration_logger "repo uses Git LFS" 0 true
+    else
+        migration_logger "repo uses Git LFS" 1 true
     fi
 
     # Scanned after the commit above so that files from flattened submodules

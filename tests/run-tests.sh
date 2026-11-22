@@ -77,14 +77,24 @@ commit_all "$src" "feature"
 git -C "$src" checkout -q main
 git clone -q --bare "$src" "$gitlab/corp-site.git"
 
-# A repo with a submodule whose default branch isn't main.
+# A repo with two submodules whose default branch isn't main. The assets one
+# has a file bigger than MAX_BLOB_SIZE and one in Git LFS.
 src="$work/src/lib"
 git init -q "$src" && echo "lib" > "$src/lib.txt" && commit_all "$src" "lib"
 git clone -q --bare "$src" "$gitlab/lib.git"
+src="$work/src/assets"
+git init -q "$src" && git -C "$src" lfs track '*.psd' > /dev/null
+echo "assets" > "$src/readme.txt"
+head -c 2000000 /dev/urandom > "$src/video.mp4"
+head -c 2000000 /dev/urandom > "$src/logo.psd"
+commit_all "$src" "assets"
+git init -q --bare "$gitlab/assets.git"
+git -C "$src" push -q "file://$gitlab/assets.git" --all > /dev/null 2>&1
 src="$work/src/with-submodule"
 git init -q "$src" && echo "readme" > "$src/README" && commit_all "$src" "readme"
 git -C "$src" checkout -qb develop
 git -C "$src" submodule -q add "file://$gitlab/lib.git" vendor/lib
+git -C "$src" submodule -q add "file://$gitlab/assets.git" vendor/assets
 echo "build: {script: make}" > "$src/.gitlab-ci.yml"
 commit_all "$src" "add submodule"
 git clone -q --bare "$src" "$gitlab/with-submodule.git"
@@ -284,6 +294,12 @@ sub="$github/with-submodule.git"
 check "sets the GitHub default branch to GitLab's" test "$(git --git-dir="$sub" symbolic-ref HEAD)" = refs/heads/develop
 check "turns submodules into regular files" test "$(git --git-dir="$sub" cat-file -t develop:vendor/lib/lib.txt)" = blob
 check "removes .gitmodules" not git --git-dir="$sub" cat-file -e develop:.gitmodules
+check "keeps small files from submodules" git --git-dir="$sub" cat-file -e develop:vendor/assets/readme.txt
+check "leaves out large files from submodules" not git --git-dir="$sub" cat-file -e develop:vendor/assets/video.mp4
+check "records large files left out of submodules" grep -q "with-submodule: large file from a submodule ([0-9]* bytes): vendor/assets/video.mp4" "$run2/_scrubbed.txt"
+check "keeps Git LFS files from submodules as LFS pointers" grep -q "^version https://git-lfs" <(git --git-dir="$sub" cat-file -p develop:vendor/assets/logo.psd)
+check "pushes Git LFS files that came in with submodules" test "$(find "$sub/lfs/objects" -type f 2> /dev/null | wc -l)" -eq 1
+check "counts Git LFS files that came in with submodules" grep -q "\[repo: with-submodule\] -- TRUE -- repo uses Git LFS" "$run2/_log.txt"
 check "archives the repo with submodules" is_archived 102
 
 check "doesn't keep a secrets report for clean repos" not test -e "$run2/_script-products/secret-reports/websites--Corp Site.json"
@@ -337,6 +353,10 @@ check "gives the team the permission set in GITHUB_TEAM_PERMISSION" grep -qx "we
 site_refs=$(site_git show-ref)
 timeout 300 "$repo_root/02__clone-scrub-import-client-repos.sh" -f "$work/websites.txt" > /dev/null 2>&1
 check "leaves already-migrated repos untouched on a rerun" test "$(site_git show-ref)" = "$site_refs"
+
+MAX_BLOB_SIZE="lots" "$repo_root/02__clone-scrub-import-client-repos.sh" -f "$work/websites.txt" > "$work/bad-size.out" 2>&1
+check "refuses a MAX_BLOB_SIZE that isn't a size" test $? -eq 1
+check "says what's wrong with MAX_BLOB_SIZE" grep -q "MAX_BLOB_SIZE must be a size" "$work/bad-size.out"
 
 echo
 if [ "$failures" -ne 0 ]; then
