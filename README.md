@@ -41,6 +41,7 @@ Both scripts read these environment variables:
 | `tests/` | End-to-end tests, see [Tests](#tests) |
 | `.github/workflows/test.yml` | Runs shellcheck and the tests on every push and pull request |
 | `.github/dependabot.yml` | Has Dependabot propose updates to the actions the CI workflow uses |
+| `CLAUDE.md` | Notes for whoever changes the scripts next: decisions made, how script 02 is put together, how to check a change |
 
 ## Scripts Overview
 The files `01__generate-gitlab-lists.sh` and `02__clone-scrub-import-client-repos.sh` are bash scripts that can be executed from your git bash terminal. These scripts perform the work of pulling repositories out of GitLab, prepping them, and migrating the repos into GitHub.
@@ -135,19 +136,16 @@ With `-n`, every repository is cloned, scrubbed and scanned for secrets as usual
 The test fixtures cover, among other things: pagination and API errors, exclusions, removing dumps and large files from history, submodules, Git LFS, secrets, dry runs, name clashes, retries and reruns. CI runs the tests and shellcheck on Linux. They haven't been run on Windows.
 
 ## To-do
-- [ ] **Try the scripts on a small real batch.** Everything so far has been tested against fakes only. Do a dry run (`-n`) on 3–5 real repos, including a WordPress site, an LFS repo and one with submodules, then a real run. Check that:
-  - GitLab returns the `empty_repo` field the script relies on
-  - `GITLAB_URL` works over `https://`
-  - the secret scan doesn't flag too many false positives (add allowlists to `gitleaks.toml`)
-  - renamed repos get the names you expect
-  - branches, tags, LFS files, team access and the description arrive on GitHub
-- [ ] **Decide what to do about the name clashes that remain.** Prefixing with the group's full path tells apart repos whose groups share a name (e.g. `templates/site` and `packages/Templates/site`). Two repos still get the same GitHub name, and the second fails as "already exists", when both are in user namespaces, which keep their names. The same happens in the rare case where two full paths only differ by `/` and `-`, such as `a-b/site` and `a/b/site`.
-- [x] **Remove large files that come in with flattened submodules.** Done: they're left out of the final commit and recorded in `_scrubbed.txt`.
-- [ ] **Decide what to do with repos that have nested submodules.** They're only listed in `_has_modules.txt` for now.
-- [x] **Share the GitLab API code between the scripts.** Done: it's in `lib/gitlab.sh`.
-- [x] **Pin the CI workflow's actions to commit SHAs and turn on Dependabot.** Done. Dependabot doesn't cover the gitleaks version pinned in the workflow, which is updated by hand.
-- [ ] **Run the tests on Windows in CI**, since the scripts are meant to be run from Git Bash.
-- [ ] **Port the pipelines listed in `_has_gitlab_ci.txt` to GitHub Actions** as repos are migrated.
+Open work is tracked in GitHub issues:
+
+- [ ] [#11](https://github.com/gitosaurusrex/lab-to-hub/issues/11) **Trial-run the scripts on a small batch of real repos.** Everything has been tested against fakes only. Do this first: it lists what only a real run can confirm.
+- [ ] [#12](https://github.com/gitosaurusrex/lab-to-hub/issues/12) **Decide how to handle repos with nested submodules.** They're only listed in `_has_modules.txt` for now.
+- [ ] [#13](https://github.com/gitosaurusrex/lab-to-hub/issues/13) **Repo name clashes that still fail as "already exists":** two repos in user namespaces with the same name, or two group full paths that only differ by `/` and `-`.
+- [ ] [#14](https://github.com/gitosaurusrex/lab-to-hub/issues/14) **Run the tests on Windows (Git Bash) in CI.**
+- [ ] [#15](https://github.com/gitosaurusrex/lab-to-hub/issues/15) **Port the GitLab CI pipelines of migrated repos to GitHub Actions**, using `_has_gitlab_ci.txt`.
+- [ ] [#16](https://github.com/gitosaurusrex/lab-to-hub/issues/16) **Keep the CI's gitleaks and git-filter-repo versions current.** Dependabot only covers the GitHub Actions.
+
+Done: large files from flattened submodules are left out ([#6](https://github.com/gitosaurusrex/lab-to-hub/pull/6)), the GitLab API code is shared in `lib/gitlab.sh` and the CI workflow's actions are pinned to commit SHAs and updated by Dependabot ([#7](https://github.com/gitosaurusrex/lab-to-hub/pull/7)).
 
 [^1]: There is no visibility filter on this request, so the lists cover internal and public groups alike.
 [^2]: GitLab returns subgroups as groups of their own, so a subgroup gets its own file named after its full path. For example, a group named `templates` and a subgroup `Templates` of a parent group `packages` produce `group--templates.txt` and `group--packages__Templates.txt`.
