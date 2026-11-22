@@ -146,6 +146,14 @@ done
 mkdir -p "$work/gitlab/jdoe"
 git clone -q --bare "$work/src/shared" "$work/gitlab/jdoe/shared.git"
 
+# Repos named "site" in the templates group and in its namesake subgroup
+# packages/Templates, which only the full path of each group tells apart.
+src="$work/src/site"
+git init -q "$src" && echo "site" > "$src/file.txt" && commit_all "$src" "site"
+for group_path in templates packages/Templates; do
+    git clone -q --bare "$src" "$work/gitlab/$group_path/site.git"
+done
+
 git clone -q --bare "$work/src/already-there" "$github/already-there.git"
 already_there_refs=$(git --git-dir="$github/already-there.git" show-ref)
 
@@ -166,7 +174,7 @@ state_path, gitlab = sys.argv[1:]
 # subgroup sharing its name with another group and a group that errors.
 groups = [{"id": i, "name": f"filler-{i}", "full_path": f"filler-{i}"} for i in range(5, 25)]
 groups += [
-    {"id": 2, "name": "templates", "full_path": "templates"},
+    {"id": 2, "name": "Template Library", "full_path": "templates"},
     {"id": 3, "name": "Templates", "full_path": "packages/Templates"},
     {"id": 4, "name": "broken", "full_path": "broken", "fail_page": 1},
     {"id": 1, "name": "websites", "full_path": "websites"},
@@ -174,7 +182,8 @@ groups += [
 def project(id, name, path, group, empty=False, default_branch="main", archived=False, description=""):
     return {"id": id, "name": name, "path": path, "archived": archived, "description": description,
             "empty_repo": empty, "default_branch": None if empty else default_branch,
-            "namespace": {"id": group["id"], "name": group["name"], "kind": group.get("kind", "group")},
+            "namespace": {"id": group["id"], "name": group["name"], "kind": group.get("kind", "group"),
+                          "full_path": group["full_path"]},
             "http_url_to_repo": f"file://{gitlab}/{path}.git"}
 websites, templates, sub_templates = groups[-1], groups[-4], groups[-3]
 projects = [
@@ -192,7 +201,9 @@ projects = [
     project(112, "Portal", "portal", websites),
     project(202, "Shared", "shared", templates),
     project(203, "portal", "portal", templates),
-    project(401, "shared", "shared", {"id": 900, "name": "jdoe", "kind": "user"}),
+    project(401, "shared", "shared", {"id": 900, "name": "jdoe", "full_path": "jdoe", "kind": "user"}),
+    project(204, "site", "../templates/site", templates),
+    project(302, "site", "../packages/Templates/site", sub_templates),
     project(201, "template-a", "template-a", templates),
     project(301, "template-b", "template-b", sub_templates),
 ]
@@ -225,6 +236,8 @@ check "writes url,group,name,id lines" grep -qx "file://$gitlab/corp-site.git,we
 check "keeps a subgroup apart from a group of the same name" grep -q template-b "$lists/group--packages__Templates.txt"
 check "doesn't mix subgroup repos into the other group" not grep -q template-b "$lists/group--templates.txt"
 cp "$lists/group--websites.txt" "$work/websites.txt"
+# Script 02 also gets the two "site" repos from the templates groups.
+grep -h ",site," "$lists/group--templates.txt" "$lists/group--packages__Templates.txt" >> "$work/websites.txt"
 
 "$repo_root/01__generate-gitlab-lists.sh" -g packages/Templates > /dev/null 2>&1
 check "-g selects a group by full path" test "$(ls "$lists")" = "group--packages__Templates.txt"
@@ -253,11 +266,11 @@ check "dry run: finishes the batch" test $? -eq 0
 check "dry run: doesn't create GitHub repos" test "$(ls "$github")" = "$github_repos_before"
 check "dry run: only reads from GitHub" not grep -qv "^gh repo view " "$FAKE_GITHUB_DIR/gh-calls.log"
 check "dry run: doesn't archive anything in GitLab" not jq -e '[.projects[] | select(.id != 107) | .archived] | any' "$state"
-check "dry run: records what would be migrated" test "$(cut -d, -f3 "$run2/_dry-run_done.txt" | sort | tr '\n' ' ')" = "Corp Site Portal flaky lfs-site old-archived shared shared with-submodule "
+check "dry run: records what would be migrated" test "$(cut -d, -f3 "$run2/_dry-run_done.txt" | sort | tr '\n' ' ')" = "Corp Site Portal flaky lfs-site old-archived shared shared site site with-submodule "
 check "dry run: records repos with secrets" grep -q "leaky,108" "$run2/_dry-run_has_secrets.txt"
 check "dry run: records failures" test "$(wc -l < "$run2/_dry-run_failed.txt")" -eq 2
 check "dry run: keeps its results apart from real runs" not test -e "$run2/_done.txt"
-check "dry run: says so in the summary" grep -q "would be migrated: 8" "$work/dry-run.out"
+check "dry run: says so in the summary" grep -q "would be migrated: 10" "$work/dry-run.out"
 
 # A _failed.txt from before the reasons were added, with a blank separator line.
 printf '\n%s\n' "file://$gitlab/old.git,websites,old,999" > "$run2/_failed.txt"
@@ -328,13 +341,15 @@ check "fails a repo when a GitHub step fails" grep -q "flaky,106,failed: giving 
 check "doesn't archive a repo that failed" not is_archived 106
 check "logs results without the old typo" not grep -q SUCCESSFULL "$run2/_log.txt"
 check "lists repos with a .gitlab-ci.yml" test "$(cut -d, -f3 "$run2/_has_gitlab_ci.txt")" = "with-submodule"
-check "sums up the run" grep -qx "  migrated: 7 (_done.txt)" "$work/run2.out"
+check "sums up the run" grep -qx "  migrated: 9 (_done.txt)" "$work/run2.out"
 check "prefixes a name that clashes with another group's repo" git --git-dir="$github/websites-shared.git" cat-file -e main:file.txt
 check "doesn't prefix the name of a repo in a user's namespace" git --git-dir="$github/shared.git" cat-file -e main:file.txt
 check "treats names that only differ in case as clashing" test -d "$github/websites-Portal.git"
 check "counts archived repos as clashes" git --git-dir="$github/websites-old-archived.git" cat-file -e main:file.txt
 check "doesn't prefix names that don't clash" test -d "$github/Corp-Site.git"
 check "logs the new name" grep -q "so it becomes websites-shared" "$run2/_log.txt"
+check "prefixes with the group's path rather than its name" git --git-dir="$github/templates-site.git" cat-file -e main:file.txt
+check "prefixes a subgroup's repo with the group's full path" git --git-dir="$github/packages-Templates-site.git" cat-file -e main:file.txt
 check "sums up the failures" grep -qx "  failed: 3 (_failed.txt)" "$work/run2.out"
 check "lists the failures of the run in the summary" grep -q "^    file://.*/flaky.git,.*failed: " "$work/run2.out"
 check "lists only the failures of the run in the summary" not grep -q "old,999" "$work/run2.out"

@@ -242,12 +242,12 @@ migrate_repo() {
     description=$(jq -r '.description // empty' <<< "$project_json")
 
     # Every step below uses this name. Repos in a group whose names clash with
-    # another GitLab repo's get the group's name as a prefix; repos in a user's
-    # namespace keep theirs.
+    # another GitLab repo's get the group's full path as a prefix, e.g.
+    # packages-Templates-site; repos in a user's namespace keep theirs.
     target_project_name=$(github_name <<< "$project_name")
     if json_test '.namespace.kind == "group"' <<< "$project_json" &&
         grep -qixF -- "$target_project_name" <<< "$clashing_names"; then
-        target_project_name="$(jq -r '.namespace.name' <<< "$project_json" | github_name)-$target_project_name"
+        target_project_name="$(jq -r '.namespace.full_path' <<< "$project_json" | github_name)-$target_project_name"
         migration_logger "repo name clashes with another GitLab repo's, so it becomes $target_project_name" 0 true
     fi
     github_repo="$github_repo_target/$target_project_name"
