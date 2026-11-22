@@ -1,0 +1,9 @@
+# Opens pull requests when the GitHub Actions used by the CI workflow have new
+# releases. The workflow pins them to commit SHAs, which Dependabot updates
+# along with the version comment next to each.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

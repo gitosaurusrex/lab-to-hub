@@ -354,6 +354,15 @@ site_refs=$(site_git show-ref)
 timeout 300 "$repo_root/02__clone-scrub-import-client-repos.sh" -f "$work/websites.txt" > /dev/null 2>&1
 check "leaves already-migrated repos untouched on a rerun" test "$(site_git show-ref)" = "$site_refs"
 
+# Copied without lib/, the scripts stop before doing anything.
+mkdir -p "$work/no-lib" && cp "$repo_root"/0*.sh "$work/no-lib/"
+for script in "$work"/no-lib/0*.sh; do
+    (cd "$work/no-lib" && "$script" -f "$work/websites.txt" > /dev/null 2>&1)
+    status=$?
+    check "$(basename "$script") stops without lib/" test "$status" -eq 1
+done
+check "the scripts write nothing without lib/" test "$(find "$work/no-lib" -mindepth 1 | wc -l)" -eq 2
+
 MAX_BLOB_SIZE="lots" "$repo_root/02__clone-scrub-import-client-repos.sh" -f "$work/websites.txt" > "$work/bad-size.out" 2>&1
 check "refuses a MAX_BLOB_SIZE that isn't a size" test $? -eq 1
 check "says what's wrong with MAX_BLOB_SIZE" grep -q "MAX_BLOB_SIZE must be a size" "$work/bad-size.out"

@@ -8,7 +8,10 @@ set -uo pipefail
 gitlab_url="${GITLAB_URL:-https://GITLAB-HOSTNAME}"
 main_output_dir="_script-products"
 output_dir="$main_output_dir/01__generate-gitlab-lists"
-per_page=100
+
+script_dir=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=lib/gitlab.sh
+source "$script_dir/lib/gitlab.sh" || exit 1
 
 usage() {
   echo "Usage: $0 [ -t <your-gitlab-access-token> ] [ -g <gitlab-group-name-or-full-path> ]"
@@ -30,21 +33,6 @@ if [ -z "$gl_token" ]; then
     echo "A GitLab token is required (-t or GITLAB_TOKEN) whereas -g is optional."
     usage
 fi
-
-# Prints every item of a paginated GitLab API collection, one JSON object per
-# line. Fails when a page can't be fetched or isn't a JSON array, rather than
-# requesting further pages forever.
-gitlab_get_all() {
-    local endpoint=$1 query=$2 page=1 response
-    while :; do
-        response=$(printf 'header = "PRIVATE-TOKEN: %s"\n' "$gl_token" |
-            curl -sSf --config - "$gitlab_url/api/v4/$endpoint?${query:+$query&}per_page=$per_page&page=$page") || return 1
-        jq -e 'type == "array"' <<< "$response" > /dev/null || return 1
-        [ "$(jq 'length' <<< "$response")" -eq 0 ] && return 0
-        jq -c '.[]' <<< "$response"
-        page=$((page + 1))
-    done
-}
 
 echo "Requesting group data from GitLab"
 if ! groups=$(gitlab_get_all "groups" ""); then
