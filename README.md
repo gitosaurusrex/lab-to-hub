@@ -36,9 +36,11 @@ Both scripts read these environment variables:
 | --- | --- |
 | `01__generate-gitlab-lists.sh` | Lists the repositories of each GitLab group |
 | `02__clone-scrub-import-client-repos.sh` | Migrates the repositories in a list to GitHub |
+| `lib/gitlab.sh` | The GitLab API functions both scripts use |
 | `gitleaks.toml` | Secret scanning rules used by script 02. Add allowlists for reviewed false positives here. |
 | `tests/` | End-to-end tests, see [Tests](#tests) |
 | `.github/workflows/test.yml` | Runs shellcheck and the tests on every push and pull request |
+| `.github/dependabot.yml` | Has Dependabot propose updates to the actions the CI workflow uses |
 
 ## Scripts Overview
 The files `01__generate-gitlab-lists.sh` and `02__clone-scrub-import-client-repos.sh` are bash scripts that can be executed from your git bash terminal. These scripts perform the work of pulling repositories out of GitLab, prepping them, and migrating the repos into GitHub.
@@ -66,7 +68,7 @@ This data is comma-separated, one repository per line. The products of this scri
 If a group's repositories can't be retrieved, the script reports it, carries on with the other groups and exits with a non-zero status.
 
 ### Tips
-* It's strongly recommended that you put these scripts in a new directory as close to the root of your drive as possible because the migration process will involve cloning repositories to your drive and Windows doesn't like files with very, very long paths.
+* It's strongly recommended that you put these scripts in a new directory as close to the root of your drive as possible because the migration process will involve cloning repositories to your drive and Windows doesn't like files with very, very long paths. Clone or copy the whole repository there: the scripts need `lib/` and `gitleaks.toml` next to them.
 
 ## Script "02" Overview
 ### Usage
@@ -142,8 +144,8 @@ The test fixtures cover, among other things: pagination and API errors, exclusio
 - [ ] **Resolve the name clashes that remain.** Two repos still get the same GitHub name, and the second fails as "already exists", when both are in user namespaces, or when their groups share a name (e.g. `templates/site` and `packages/Templates/site`). Prefixing with the group's full path would fix the latter.
 - [x] **Remove large files that come in with flattened submodules.** Done: they're left out of the final commit and recorded in `_scrubbed.txt`.
 - [ ] **Decide what to do with repos that have nested submodules.** They're only listed in `_has_modules.txt` for now.
-- [ ] **Share the GitLab API code between the scripts.** Both scripts have their own copy of it.
-- [ ] **Pin the CI workflow's actions to commit SHAs and turn on Dependabot.**
+- [x] **Share the GitLab API code between the scripts.** Done: it's in `lib/gitlab.sh`.
+- [x] **Pin the CI workflow's actions to commit SHAs and turn on Dependabot.** Done. Dependabot doesn't cover the gitleaks version pinned in the workflow, which is updated by hand.
 - [ ] **Run the tests on Windows in CI**, since the scripts are meant to be run from Git Bash.
 - [ ] **Port the pipelines listed in `_has_gitlab_ci.txt` to GitHub Actions** as repos are migrated.
 

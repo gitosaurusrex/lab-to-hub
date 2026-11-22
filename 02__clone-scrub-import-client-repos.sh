@@ -19,6 +19,8 @@ sql_dump_regex='^data/(?:.*/)?(?!github\.sql$)[^/]*\.sql$'
 
 base_dir=$(pwd)
 script_dir=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=lib/gitlab.sh
+source "$script_dir/lib/gitlab.sh" || exit 1
 # The secret scan always uses this repo's gitleaks.toml and .gitleaksignore, so
 # that the ones inside a migrated repo can't switch it off.
 gitleaks_config="$script_dir/gitleaks.toml"
@@ -109,25 +111,6 @@ trim() {
     local s=$1
     s="${s#"${s%%[![:space:]]*}"}"
     printf '%s' "${s%"${s##*[![:space:]]}"}"
-}
-
-gitlab_api() {
-    local method=$1 endpoint=$2
-    printf 'header = "PRIVATE-TOKEN: %s"\n' "$gl_token" |
-        curl -sSf --config - --request "$method" "$gitlab_url/api/v4/$endpoint"
-}
-
-# Prints every item of a paginated GitLab API collection, one JSON object per
-# line, failing when a page can't be fetched or isn't a JSON array.
-gitlab_get_all() {
-    local endpoint=$1 query=$2 page=1 response
-    while :; do
-        response=$(gitlab_api GET "$endpoint?${query:+$query&}per_page=100&page=$page") || return 1
-        jq -e 'type == "array"' <<< "$response" > /dev/null || return 1
-        [ "$(jq 'length' <<< "$response")" -eq 0 ] && return 0
-        jq -c '.[]' <<< "$response"
-        page=$((page + 1))
-    done
 }
 
 # Makes the names on stdin valid GitHub repo names, e.g. by replacing spaces.
